@@ -1,0 +1,227 @@
+#!/bin/sh 
+#
+# External STONITH module for Raritan Dominion-PX
+#
+# This modules uses uses the net-snmp programs for the whole
+# communication. 
+#
+# Dominion-Code:
+# 2011 Joerg Kost <jk@premium-datacenter.com>
+# IPMI-skeleton:
+# Copyright (c) 2007 Martin Bene <martin.bene@icomedias.com>
+#
+# Usage like
+# primitive shoot-pacemaker1 stonith:external/dominionpx \
+# params hostname="pacemaker1" ipaddr="192.168.1.3" snmpreadcommunity="fooread" snmpwritecommunity="foowrite" outlet="2" 
+# primitive shoot-pacemaker2 stonith:external/dominionpx \
+# params hostname="pacemaker2" ipaddr="192.168.1.3" snmpreadcommunity="fooread" snmpwritecommunity="foowrite" outlet="3"
+# location l-shoot-pacemaker1 shoot-pacemaker1 -inf: pacemaker1
+# location l-shoot-pacemaker2 shoot-pacemaker2 -inf: pacemaker2
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of version 2 of the GNU General Public License as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it would be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+#
+# Further, this software is distributed without any warranty that it is
+# free of the rightful claim of any third person regarding infringement
+# or the like.  Any license provided herein, whether implied or
+# otherwise, applies only to this software file.  Patent licenses, if
+# any, provided herein do not apply to combinations of this program with
+# other software, or any other product whatsoever.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write the Free Software Foundation,
+# Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
+#
+
+# Initialization -- fix locale settings so we can parse output from
+# binaries if we need it
+LANG=C
+LC_ALL=C
+
+RESET="i 2"
+POWEROFF="i 0"
+POWERON="i 1"
+SNMPSET=`which snmpset 2>/dev/null`
+SNMPWALK=`which snmpwalk 2>/dev/null`
+SNMPGET=`which snmpget 2>/dev/null`
+DOMINIONPX=".1.3.6.1.4.1.13742.4.1.2.2.1.3."
+
+have_snmpset() {
+	test -x "${SNMPSET}"
+}
+
+have_snmpget() {
+	test -x "${SNMPGET}"
+}
+
+have_snmpwalk() {
+	test -x "${SNMPWALK}"
+}
+
+# Wrapper for SNMP
+run_snmp() {
+	local snmp_port
+	snmp_port="${DOMINIONPX}${outlet}";
+	have_snmpset || {
+		ha_log.sh err "snmpset not installed"
+		return 1
+	}
+
+	if [ -z "${ipaddr}" -o -z "${outlet}" -o -z "${hostname}" -o -z "${snmpreadcommunity}" -o -z "${snmpwritecommunity}" ]; then
+		ha_log.sh err "ipaddr, outlet, hostname, snmpwritecommunity snmpreadcommunity missing; check configuration"
+		return 1
+	fi
+
+	action="$*"
+	${SNMPSET} -v2c -c ${snmpwritecommunity} ${ipaddr} ${snmp_port} ${action}
+
+}
+
+do_snmp() {
+	if outp=`run_snmp $*`; then
+		ha_log.sh debug "run_snmp output: `echo $outp`"
+		return 0
+	else
+		ha_log.sh err "error executing snmpset: `echo $outp`"
+		return 1
+	fi
+}
+
+outlet_is_power_on() {
+	local snmp_port
+	local outp
+	
+	have_snmpget || {
+		ha_log.sh err "snmpget not installed"
+		return 1
+	}
+
+	snmp_port="${DOMINIONPX}${outlet}";
+	outp=`${SNMPGET} -v2c -c ${snmpwritecommunity} ${ipaddr} ${snmp_port}` 
+	if [ `expr match "$outp" ".*INTEGER: 1"` != "0" ]; then
+			return 0
+	elif [ `expr match "$outp" ".*INTEGER: 0"` != "0" ]; then
+			return 1
+	fi
+	
+}
+
+
+case ${1} in
+gethosts)
+	echo ${hostname}
+	exit 0
+	;;
+on)
+	do_snmp "${POWERON}"
+	exit
+	;;
+off)
+	do_snmp "${POWEROFF}"
+	exit
+	;;
+poweroff)
+	do_snmp "${POWEROFF}"
+	exit
+	;;
+reset)
+	if outlet_is_power_on; then
+		do_snmp "${RESET}"
+	else
+		do_snmp "${POWERON}"
+	fi
+	exit
+	;;
+status)
+	have_snmpwalk || {
+		ha_log.sh err "snmpwalk not installed"
+		return 1
+	}
+	${SNMPWALK} "${ipaddr}" -v2c -c "${snmpreadcommunity}" >/dev/null 2>&1
+	exit $?
+	;;
+getconfignames)
+	for i in hostname ipaddr outlet snmpreadcommunity snmpwritecommunity; do
+		echo $i
+	done
+	exit 0
+	;;
+getinfo-devid)
+	echo "Dominion-PX STONITH device"
+	exit 0
+	;;
+getinfo-devname)
+	echo "Dominion-PX STONITH external device"
+	exit 0
+	;;
+getinfo-devdescr)
+	echo "Dominion-PX based power management. Functions limited to poweroff/poweron and cycle."
+	exit 0
+	;;
+getinfo-xml)
+	cat << DOMINIONPXXML
+<parameters>
+<parameter name="hostname" unique="1">
+<content type="string" />
+<shortdesc lang="en">
+Hostname
+</shortdesc>
+<longdesc lang="en">
+The name of the host to be managed by this STONITH device.
+</longdesc>
+</parameter>
+
+<parameter name="ipaddr" unique="0">
+<content type="string" />
+<shortdesc lang="en">
+IP Address
+</shortdesc>
+<longdesc lang="en">
+The IP address of the STONITH device.
+</longdesc>
+</parameter>
+
+<parameter name="outlet" unique="0">
+<content type="string" />
+<shortdesc lang="en">
+Raritian Dominion PX Port
+</shortdesc>
+<longdesc lang="en">
+The outlet of the desired Dominion-PX Port.</longdesc>
+</parameter>
+
+<parameter name="snmpreadcommunity" unique="0">
+<content type="string" />
+<shortdesc lang="en">
+Raritian Dominion PX SNMP Community for Reading
+</shortdesc>
+<longdesc lang="en">
+Raritian Dominion PX SNMP Community for Reading
+.</longdesc>
+</parameter>
+
+<parameter name="snmpwritecommunity" unique="0">
+<content type="string" />
+<shortdesc lang="en">
+Raritian Dominion PX Community for Writing
+</shortdesc>
+<longdesc lang="en">
+Raritian Dominion PX Community for Writing
+.</longdesc>
+</parameter>
+
+</parameters>
+DOMINIONPXXML
+
+	exit 0
+	;;
+*)
+	exit 1
+	;;
+esac
+
