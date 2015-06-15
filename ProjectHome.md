@@ -1,0 +1,1 @@
+Stonith pacemaker agent for Raritan Dominion PX. Only 2 nodes cluster supported so far.
